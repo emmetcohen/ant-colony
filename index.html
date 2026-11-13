@@ -26,6 +26,14 @@ canvas{image-rendering:pixelated;image-rendering:crisp-edges;cursor:crosshair;bo
 #stats .ev{opacity:.8;font-size:11px}
 #stats ul{margin:2px 0 0;padding-left:16px}
 #stats li{margin-bottom:4px;font-size:11.5px}
+#clock{position:absolute;right:14px;top:8px;text-align:right;pointer-events:none;text-shadow:0 1px 0 #000,0 0 4px #000;line-height:1.1}
+#clock b{font-size:22px;letter-spacing:.04em}
+#clock span{font-size:11px;opacity:.8}
+#bubbles{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.bub{position:absolute;transform:translate(-50%,-100%);background:#fffaf0;color:#2a1d12;font-size:11px;line-height:1.3;padding:4px 7px;border-radius:8px;max-width:190px;text-align:center;box-shadow:0 2px 0 rgba(0,0,0,.35);transition:opacity .6s}
+.bub:after{content:'';position:absolute;left:50%;bottom:-5px;margin-left:-5px;border:5px solid transparent;border-bottom:0;border-top-color:#fffaf0}
+.bub b{display:block;font-size:9.5px;opacity:.55;font-weight:600}
+.bub.ai{background:#eef6ff}.bub.ai:after{border-top-color:#eef6ff}
 #toast{left:50%;top:14px;transform:translateX(-50%);display:none;max-width:460px;text-align:center}
 #catch{inset:0;border:0;border-radius:0;background:rgba(20,14,10,.9);display:none;align-items:center;justify-content:center;flex-direction:column;font-size:14px;text-align:center}
 .bar{width:260px;height:10px;background:#3a2a1c;margin-top:12px;border:1px solid #5a4430}
@@ -37,9 +45,11 @@ canvas{image-rendering:pixelated;image-rendering:crisp-edges;cursor:crosshair;bo
 <body>
 <div id="wrap"><canvas id="cv"></canvas></div>
 <div id="hud"></div>
-<div id="hint">click: drop food &middot; F: switch sugar / cricket / water &middot; hold: pour &middot; right-click: remove &middot; shift+click: inspect an ant &middot; S: stats &amp; care tips &middot; T: time-lapse &middot; A: AI brains</div>
+<div id="hint">click: drop food &middot; F: switch sugar / cricket / water &middot; hold: pour &middot; right-click: remove &middot; shift+click: inspect an ant &middot; S: stats &amp; care tips &middot; T: time-lapse &middot; A: AI brains &middot; B: thought bubbles</div>
 <div id="card" class="box"></div>
 <div id="stats" class="box"></div>
+<div id="bubbles"></div>
+<div id="clock"></div>
 <div id="toast" class="box"></div>
 <div id="catch" class="box"></div>
 <script>
@@ -69,6 +79,8 @@ let places={};
 let stash=0,protStash=0,moisture=.6,tickN=0,terrainVer=1,bioNow=0,t0=Date.now(),nid=1,nameN=0,lastExpand=0,workMul=1;
 let logs={},events=[],totals={};
 let stim={forage:0,dig:0,nurse:0,clean:0,queen:0};
+const speech=[]; // things ants "say": the browser shows them as speech bubbles
+function say(a,text,imp){if(!a||!text)return;if(speech.length>30)speech.shift();speech.push({a,text:String(text).slice(0,110),imp:!!imp})}
 let brain=null; // AI brain (set up in the browser). When it's busy or off, ants act on instinct (the rules).
 const fcache=new Map();
 const bq=new Int32Array(CW*CH);
@@ -280,6 +292,8 @@ function note(a,dx,dy){
   // smooth the direction so the ant doesn't flip back and forth, and keep its belly on the same side when climbing
   a.vx=a.vx*.82+dx*.18;a.vy=a.vy*.82+dy*.18;
   const ax=Math.abs(a.vx),ay=Math.abs(a.vy);if(ax+ay<.12)return;
+  // walking on open ground: always shown level, never stood up on end
+  if(above(a)&&!free(a.x,a.y+4.5)&&free(a.x-6,a.y)&&free(a.x+6,a.y)){if(a.face>1||ax>.05)a.face=a.vx>=0?0:1;return}
   if(a.face<2){
     if(ay>ax*1.6){const up=a.vy<0,right=a.face===0;a.face=up?(right?2:3):(right?4:5)}
     else if(ax>ay*.8)a.face=a.vx>0?0:1;
@@ -315,6 +329,7 @@ function anchorFor(x,y){
   return {x,y};
 }
 function nav(a,x,y,sp){
+  a.goal={x,y};
   const dd=hyp(x-a.x,y-a.y);
   if(above(a)&&Math.abs(a.x-EX)>2.5){
     // on the surface ants walk over the soil and mounds, toward the entrance if the target is underground
@@ -330,6 +345,7 @@ function nav(a,x,y,sp){
   fixBlocked(a);return dd;
 }
 function navExit(a,sp){
+  a.goal={x:EX,y:gh[EX]-6,exit:true};
   let f=getField('exit'),t=descend(a,f);
   if(!t){f=getField('exit',true);t=descend(a,f)}
   if(!t){f=getField('exit',false,true);t=descend(a,f,true);a.cling=4}
@@ -337,6 +353,7 @@ function navExit(a,sp){
   fixBlocked(a);
 }
 function surfaceWalk(a,tx,sp){
+  if(!a.goal||a.goal.x!==tx)a.goal={x:tx,y:a.y,surf:true};
   // walk along the top of the soil, climbing over piles instead of sliding into holes
   const dx=clamp(tx-a.x,-sp,sp);if(Math.abs(dx)<.01)return;
   if(free(a.x+dx,a.y)){a.x+=dx;note(a,dx,0);a.blocked=0;return}
@@ -546,7 +563,7 @@ function applyAI(a,p){
     case 'dig':case 'nurse':case 'clean':ok=startTask(a,p.action);break;
   }
   if(!ok)return false;
-  a.aiThought=p.thought;a.aiAt=bioNow;
+  a.aiThought=p.thought;a.aiAt=bioNow;say(a,p.thought,p.important);
   if(p.remember){a.memo=(a.memo||[]).concat(p.remember.slice(0,80)).slice(-4)}
   totals.ai=(totals.ai||0)+1;
   const l=L();l.quotes=l.quotes||[];const q={n:a.name,t:p.thought};
@@ -557,7 +574,7 @@ function chooseTask(a){
   if(a.energy<.2&&stash>0){a.state='eat';a.role='hungry';return} // too hungry to think
   if(a.aiPlan){const p=a.aiPlan;a.aiPlan=null;if(applyAI(a,p))return}
   if(!a.skipAI&&brain&&brain.ready()&&!a.aiWaiting&&brain.ask(a)){a.state='think';a.timer=0;return}
-  a.skipAI=false;
+  a.skipAI=false;totals.instinct=(totals.instinct||0)+1;
   if(a.energy<.42&&stash>0){a.state='eat';a.role='hungry';return}
   // idle ants near the queen often stop to groom her
   if(queen&&places.queen&&hyp(a.x-queen.x,a.y-queen.y)<30&&rnd()<.3&&ants.filter(o=>o.state==='qGroom').length<3){a.state='qGroom';a.timer=0;a.role='attendant';return}
@@ -593,7 +610,7 @@ function startTask(a,k){
 function releaseSite(a){if(a.site){a.site.workers=Math.max(0,a.site.workers-1);a.site=null}}
 function finishTask(a){
   if((a.carry===3||a.carry===4)&&a.cref)a.cref.carried=false;
-  releaseSite(a);a.state='idle';a.carry=0;a.load=0;a.cref=null;a.tgt=null;a.partner=null;a.resting=rnd()<(a.lazy?.8:.4);a.timer=(a.lazy?200:50)+rnd()*(a.lazy?800:280);a.wspd=.2+rnd()*.35;
+  releaseSite(a);a.goal=null;a.state='idle';a.carry=0;a.load=0;a.cref=null;a.tgt=null;a.partner=null;a.resting=rnd()<(a.lazy?.8:.4);a.timer=(a.lazy?200:50)+rnd()*(a.lazy?800:280);a.wspd=.2+rnd()*.35;
 }
 function reward(a,k){a.th[k]=Math.max(.05,a.th[k]-.02);for(const o of TASKS)if(o!==k)a.th[o]=Math.min(.9,a.th[o]+.004)}
 
@@ -655,7 +672,7 @@ function updateAnt(a,dtb){
     case 'think':
       // waiting for the AI brain; if it takes too long, act on instinct
       a.timer++;if(a.timer%15===0)a.frame^=1;
-      if(a.aiPlan||!a.aiWaiting||a.timer>360){if(!a.aiPlan)a.skipAI=true;chooseTask(a)}
+      if(a.aiPlan||!a.aiWaiting||a.timer>900){if(!a.aiPlan)a.skipAI=true;chooseTask(a)}
       break;
     case 'meet':
       if(--a.timer<=0)finishTask(a);else if(a.timer%9===0)a.frame^=1;
@@ -693,10 +710,10 @@ function updateAnt(a,dtb){
         if(d<6||(a.blocked>6&&d<10)){
           if(a.tgt.type==='s'){
             const n=takeSugar(a.tgt.x,a.tgt.y,Math.max(1,Math.round(workMul)));
-            if(n){a.mem={x:a.tgt.x,y:a.tgt.y};a.carry=1;a.load=n;a.state='fReturn';a.blocked=0}
+            if(n){if(!a.mem)say(a,'Sugar! I\'ll leave a trail home.');a.mem={x:a.tgt.x,y:a.tgt.y};a.carry=1;a.load=n;a.state='fReturn';a.blocked=0}
           }else{
             const f=a.tgt.ref,n=Math.min(f.amt,Math.max(1,Math.round(workMul)));f.amt-=n;if(f.amt<=0){f.gone=true;foods.splice(foods.indexOf(f),1)}
-            a.mem={x:f.x,y:f.y};a.carry=5;a.load=n;a.state='fReturn';a.blocked=0;eventOnce('prot1','Workers found the cricket and started cutting it up.');
+            if(!a.mem)say(a,'A dead insect! Protein for the larvae.');a.mem={x:f.x,y:f.y};a.carry=5;a.load=n;a.state='fReturn';a.blocked=0;eventOnce('prot1','Workers found the cricket and started cutting it up.');
           }
           a.tgt=null;
         }else if(a.blocked>25){a.h+=1.5;a.blocked=0;a.tgt=null}
@@ -706,6 +723,7 @@ function updateAnt(a,dtb){
         if(best>.08)a.h+=angDiff(bh,a.h)*.35;
         else{a.h+=(rnd()-.5)*.6;if(a.mem&&hyp(a.mem.x-a.x,a.mem.y-a.y)>8)a.h+=angDiff(Math.atan2(a.mem.y-a.y,a.mem.x-a.x),a.h)*.08}
         if(a.y<GROUND-16)a.h+=angDiff(1.57,a.h)*.05;
+        if(above(a))a.h+=angDiff(Math.cos(a.h)>=0?0:Math.PI,a.h)*.25; // on the surface, walk along it
         moveHeading(a,sp);
       }
       break}
@@ -776,7 +794,7 @@ function updateAnt(a,dtb){
     case 'cFetch':{
       const c=a.cref;if(!c||c.gone){finishTask(a);break}
       const d=nav(a,c.x,c.y,sp);
-      if(d<5){c.carried=true;a.carry=4;const m=places.midden;if(m){const p=randIn(m,3);a.tx=p.x;a.ty=p.y}a.state='cCarry'}
+      if(d<5){if(rnd()<.5)say(a,'Poor sister... taking you to the waste room.');c.carried=true;a.carry=4;const m=places.midden;if(m){const p=randIn(m,3);a.tx=p.x;a.ty=p.y}a.state='cCarry'}
       break}
     case 'cCarry':{
       const c=a.cref;if(!c||c.gone){finishTask(a);break}
@@ -903,7 +921,7 @@ function updateBrood(dtb){
       if(b.t>LARVA_T*3&&b.prot<2){loseBrood(i,'prot');continue}
       if(b.t>=LARVA_T&&b.fed>=.5&&b.prot>=2){b.stage=2;b.t=0}
     }else if(b.t>=PUPA_T){
-      const a=newAnt(b.x,b.y,0);a.role='newborn';ants.push(a);b.gone=true;brood.splice(i,1);
+      const a=newAnt(b.x,b.y,0);a.role='newborn';ants.push(a);if(rnd()<.6)say(a,'I just hatched! Everything is so big.');b.gone=true;brood.splice(i,1);
       totals.hatched++;L().hatched++;if(totals.hatched===1)addEvent('The first new worker hatched.');
     }
   }
@@ -1013,13 +1031,23 @@ function drawFood(f){
   }
   if(f.moldy)for(let k=0;k<3;k++)px(x0+((nz(f.id*7+k)%9)),y0-1,rgb(230,235,225));
 }
+let skyNow=null;
+function skyLight(){ // 0 = night, 1 = full day, from the colony clock
+  const h=((startTOD()+bioNow)%86400)/3600;
+  if(h>=7&&h<18)return 1;if(h>=21||h<5)return 0;
+  return h<7?(h-5)/2:(21-h)/3;
+}
 function render(sel,mouse,tool){
+  if(!skyNow)skyNow=new Uint32Array(H);
+  {const L=skyLight();for(let y=0;y<H;y++){const t=clamp(y/GROUND,0,1);
+    const dr=148+t*62,dg=202+t*32,db=232+t*12,nr=14+t*30,ng=20+t*30,nb=48+t*40;
+    skyNow[y]=rgb(nr+(dr-nr)*L,ng+(dg-ng)*L,nb+(db-nb)*L)}}
   const wet=1.12-.42*moisture;
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const i=y*W+x,g=grid[i];let c;
       if(g===AIR){
-        if(y<gh[x])c=skyCol[y];
+        if(y<gh[x])c=skyNow[y];
         else{c=((nz(i)&15)===0)?rgb(206,181,142):TUN;if(grid[i-1]||grid[i+1]||grid[i-W]||grid[i+W])c=TUNE}
       }else if(g===DIRT){
         const t=(y-GROUND)/(H-GROUND),n=nz(i);let r=122-t*34,gg=86-t*24,b=56-t*18;const v=(n>>4)-8;r+=v;gg+=v*.8;b+=v*.6;
@@ -1033,6 +1061,7 @@ function render(sel,mouse,tool){
       buf[i]=c;
     }
   }
+  if(skyLight()<.4){for(let k=0;k<40;k++){const x=nz(k*97+3)*2%W,y=3+nz(k*31+7)%(GROUND-12);if(y<gh[x]-4&&grid[y*W+x]===AIR&&(nz(k+(tickN>>6))&7))px(x,y,rgb(230,230,200))}}
   // stored food piles in the food chamber (sugar white, protein brown)
   const gp=gPlace();
   if(gp){
@@ -1048,6 +1077,7 @@ function render(sel,mouse,tool){
   if(queen)drawAnt(queen,true);
   for(const a of workers)drawAnt(a,false);
   for(const a of workers)if(a.carry===3&&a.cref)drawBrood(a.cref);
+  if(sel&&sel.goal)drawRoute(sel);
   if(sel){const s=sel.isQueen?SPR_Q:SPR_W,w=(sel.face<2?s.w:s.h)>>1,h=(sel.face<2?s.h:s.w)>>1,c=rgb(255,220,60),x=sel.x|0,y=sel.y|0;
     for(const [dx,dy] of [[-w-2,-h-2],[w+2,-h-2],[-w-2,h+2],[w+2,h+2]]){px(x+dx,y+dy,c);px(x+dx+(dx<0?1:-1),y+dy,c);px(x+dx,y+dy+(dy<0?1:-1),c)}}
   if(mouse&&mouse.in&&!mouse.shift){
@@ -1055,6 +1085,40 @@ function render(sel,mouse,tool){
     for(let i=0;i<6;i+=2){px(x0+i,y0,c);px(x0+i,y0+5,c);px(x0,y0+i,c);px(x0+5,y0+i,c)}
   }
   ctx.putImageData(img,0,0);
+}
+function drawRoute(a){
+  // follow the ant's own navigation map to show the way it will walk, then mark where it's going
+  const g=a.goal,dot=rgb(255,226,90),end=rgb(255,120,60);
+  let f=null;
+  if(g.exit)f=getField('exit');else if(!g.surf&&hyp(g.x-a.x,g.y-a.y)>=12){const an=anchorFor(g.x,g.y);f=fieldFor(an.x,an.y)}
+  let cx=clamp((a.x|0)>>1,0,CW-1),cy=clamp((a.y|0)>>1,0,CH-1),ok=false;
+  if(f){
+    for(let k=0;k<500;k++){
+      let bx=cx,by=cy,bd=f[cy*CW+cx];
+      for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){const nx=cx+dx,ny=cy+dy;if(nx<0||ny<0||nx>=CW||ny>=CH)continue;const v=f[ny*CW+nx];if(v<bd){bd=v;bx=nx;by=ny}}
+      if(bx===cx&&by===cy){ok=bd<INF;break}
+      cx=bx;cy=by;if(k%2===0)px(cx*2+1,cy*2+1,dot);
+    }
+  }
+  if(!ok){const d=hyp(g.x-a.x,g.y-a.y),n=Math.min(80,d/3|0);for(let k=1;k<n;k++)px((a.x+(g.x-a.x)*k/n)|0,(a.y+(g.y-a.y)*k/n)|0,dot)}
+  const x=g.x|0,y=g.y|0;for(let k=-2;k<=2;k++){px(x+k,y+k,end);px(x+k,y-k,end)}
+}
+function goalLabel(a){
+  if(!a.goal)return '';
+  const s=a.state;
+  if(a.goal.exit)return 'outside';
+  if(s==='fSearch')return a.tgt?(a.tgt.type==='p'?'the dead insect':'the sugar'):'searching around';
+  if(s==='fReturn'||s==='eat'||s==='nFeed1'||s==='qFetch'||s==='fHome')return places.granary?'the food storage room':'the food pile';
+  if(s==='nFeed2'||s==='nMove')return 'a young one in the brood pile';
+  if(s==='nDrop')return 'the nursery';
+  if(s==='dGo'||s==='dBite')return 'the dig site';
+  if(s==='dOut')return 'outside, with a soil pellet';
+  if(s==='dDump')return 'the dirt pile by the entrance';
+  if(s==='cFetch')return 'a dead nestmate';
+  if(s==='cCarry')return places.midden?'the waste room':'the trash corner outside';
+  if(s==='qFeed'||s==='qGroom')return 'the queen';
+  if(a.isQueen)return a.mode==='visit'?'the nursery':"her chamber";
+  return 'wandering';
 }
 function drawAnt(a,isQ){
   const S=isQ?SPR_Q:SPR_W;
@@ -1102,6 +1166,7 @@ function cardHTML(a){
   if(a.isQueen)h+='<br>protein '+bar(a.prot/3);
   const fresh=a.aiThought&&bioNow-a.aiAt<1800;
   h+='<br><i>"'+(fresh&&!a.pause?a.aiThought:th)+'"</i>'+(fresh?' <span style="opacity:.6">🧠 AI</span>':'');
+  if(a.goal)h+='<br>heading to: <b>'+goalLabel(a)+'</b> <span style="opacity:.6">(route shown in yellow)</span>';
   if(a.memo&&a.memo.length)h+='<br><span style="opacity:.7">remembers: '+a.memo.map(m=>m.replace(/</g,'&lt;')).join(' · ')+'</span>';
   if(!a.isQueen)h+='<br><span style="opacity:.6">likes: '+TASKS.slice().sort((p,q)=>a.th[p]-a.th[q]).slice(0,2).map(k=>({forage:'foraging',dig:'digging',nurse:'nursing',clean:'cleaning',queen:'queen care'})[k]).join(', ')+'</span>';
   return h;
@@ -1180,8 +1245,9 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.getEleme
   cv.addEventListener('pointermove',e=>{const p=toWorld(e);mouse.x=p.x;mouse.y=p.y;mouse.in=true;mouse.shift=e.shiftKey});
   cv.addEventListener('pointerleave',()=>{mouse.in=false});
   addEventListener('keydown',e=>{
-    if(e.code==='KeyS'){showStats=!showStats;statsEl.style.display=showStats?'block':'none';if(showStats)statsEl.innerHTML=statsHTML()}
-    else if(e.code==='KeyT'){speed=speed===1?4:speed===4?16:1}
+    if(e.code==='KeyS'){showStats=!showStats;lastHud=0;statsEl.style.display=showStats?'block':'none';if(showStats)statsEl.innerHTML=statsHTML()}
+    else if(e.code==='KeyT'){speed=speed===1?4:speed===4?16:1;lastHud=0}
+    else if(e.code==='KeyB'){bubMode=bubMode==='important'?'all':bubMode==='all'?'off':'important';showToast('Thought bubbles: '+{important:'important only',all:'every thought',off:'off'}[bubMode]+' (B to change)',2500)}
     else if(e.code==='KeyA'){
       if(AI.state==='on'){AI.state='paused';aiSaved('off');showToast('AI brains paused. The ants act on instinct.')}
       else if(AI.state==='loading'){}
@@ -1194,11 +1260,11 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.getEleme
   const AI={state:'off',progress:0,text:'',model:'',engine:null,queue:[],busy:false,ms:0,count:0,fails:0,err:'',lastQ:0};
   const MODEL_PREFS=[ // best first; the first one that fits this computer is used
     /^Qwen2\.5-1\.5B-Instruct-q4f16_1-MLC$/,/^Llama-3\.2-1B-Instruct-q4f16_1-MLC$/,/^Qwen2\.5-0\.5B-Instruct-q4f16_1-MLC$/,/^SmolLM2-360M-Instruct-q4f16_1-MLC$/];
-  const AI_SCHEMA=JSON.stringify({type:'object',properties:{action:{type:'string',enum:AI_ACTIONS},thought:{type:'string'},remember:{type:'string'}},required:['action','thought','remember']});
+  const AI_SCHEMA=JSON.stringify({type:'object',properties:{action:{type:'string',enum:AI_ACTIONS},thought:{type:'string'},remember:{type:'string'},important:{type:'boolean'}},required:['action','thought','remember','important']});
   const Q_SCHEMA=JSON.stringify({type:'object',properties:{thought:{type:'string'}},required:['thought']});
   const SYS='You are a worker ant in a small black garden ant colony (Lasius niger) living in an ant farm. You are an insect: think in short, simple, ant-like ways, and only use what you can smell and feel. '+
     'Pick the ONE job you will do next: forage (collect food outside), explore (scout outside), dig (help dig tunnels and chambers), nurse (feed or carry eggs and larvae), clean (carry dead nestmates to the waste chamber), feed_queen, groom_queen, eat (eat from the food store), rest. '+
-    'Answer only with JSON: {"action": one job, "thought": your thought in first person, under 15 words, "remember": a very short note worth remembering, or ""}.';
+    'Answer only with JSON: {"action": one job, "thought": your thought in first person, under 15 words, "remember": a very short note worth remembering, or "", "important": true only if you noticed something big (found food, a dead nestmate, hungry larvae, the queen needs you, mold, dry soil, a new plan), otherwise false}.';
   function aiSaved(v){try{if(v===undefined)return localStorage.getItem('antcolony.ai');localStorage.setItem('antcolony.ai',v)}catch(e){return null}}
   async function startAI(){
     if(AI.state==='loading')return;
@@ -1242,8 +1308,8 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.getEleme
         :[{role:'system',content:SYS},{role:'user',content:antSenses(a)}];
       const r=await AI.engine.chat.completions.create({messages:msgs,temperature:.9,max_tokens:80,response_format:{type:'json_object',schema:isQueen?Q_SCHEMA:AI_SCHEMA}});
       const p=parseJSON(r.choices[0].message.content);
-      if(isQueen){if(p&&p.thought){queen.qThought=String(p.thought).slice(0,120);queen.qAt=bioNow}}
-      else if(p&&AI_ACTIONS.includes(p.action)&&ants.includes(a)){a.aiPlan={action:p.action,thought:String(p.thought||'').slice(0,120),remember:String(p.remember||'').slice(0,80)}}
+      if(isQueen){if(p&&p.thought){queen.qThought=String(p.thought).slice(0,120);queen.qAt=bioNow;say(queen,queen.qThought,true)}}
+      else if(p&&AI_ACTIONS.includes(p.action)&&ants.includes(a)){a.aiPlan={action:p.action,thought:String(p.thought||'').slice(0,120),remember:String(p.remember||'').slice(0,80),important:p.important===true}}
       else AI.fails++;
       AI.count++;AI.ms=AI.ms?AI.ms*.8+(performance.now()-t)*.2:performance.now()-t;
     }catch(e){AI.fails++;console.warn('AI',e)}
@@ -1251,16 +1317,17 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.getEleme
   }
   brain={
     // only while you're watching in real time (time-lapse and catch-up run on instinct, it'd be too fast to think)
-    ready:()=>AI.state==='on'&&speed===1&&!catching,
-    ask(a){if(AI.queue.length>=2)return false;a.aiWaiting=true;AI.queue.push(a);pump();return true},
+    ready:()=>AI.state==='on'&&speed<=4&&!catching,
+    ask(a){if(AI.queue.length>=8)return false;a.aiWaiting=true;AI.queue.push(a);pump();return true},
     statsHTML(){
       const row=(a,b)=>'<div class="row"><span>'+a+'</span><span>'+b+'</span></div>';
       let h=row('Status',{off:'off (press A)',loading:'loading '+Math.round(AI.progress*100)+'%',on:'on',paused:'paused (press A)',unsupported:'not supported',error:'error'}[AI.state]);
       if(AI.model)h+=row('Model',AI.model);
       if(AI.count)h+=row('Decisions made',(totals.ai||0)+' · ~'+(AI.ms/1000).toFixed(1)+'s each');
+      if(AI.state==='on'||AI.count){const ai=totals.ai||0,ins=totals.instinct||0;h+=row('Run by AI',Math.round(100*ai/Math.max(1,ai+ins))+'% of choices')}
       if(AI.err)h+='<div class="need"><div>'+AI.err.replace(/</g,'&lt;')+'</div></div>';
       if(AI.state==='loading'&&AI.text)h+='<div class="need"><div>'+AI.text.replace(/</g,'&lt;').slice(0,140)+'</div></div>';
-      h+='<div class="need"><div>Each ant takes turns asking the AI what to do, using only what a real ant could smell and feel. While the brain is busy (or during time-lapse) they act on instinct.</div></div>';
+      h+='<div class="need"><div>Each ant asks the AI what to do every time it finishes a job, using only what a real ant could smell and feel. It waits its turn (up to about 30 seconds); only if the AI is very busy, at 16× time-lapse, or while catching up does it act on instinct.</div></div>';
       return h;
     }
   };
@@ -1298,6 +1365,35 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.getEleme
     toast.style.display='block';setTimeout(()=>{toast.style.display='none'},15000);
     save();
   }
+  /* ---- clock ---- */
+  const clockEl=document.getElementById('clock');
+  function updClock(){
+    const s=(startTOD()+bioNow)%86400;let h=Math.floor(s/3600),m=Math.floor(s%3600/60);const ap=h>=12?'PM':'AM';h=h%12||12;
+    clockEl.innerHTML='<b>'+h+':'+(m<10?'0':'')+m+' '+ap+'</b><br><span>Day '+dayOf()+(speed>1?' · ⏩ '+speed+'×':'')+(skyLight()<.2?' · night':'')+'</span>';
+    clockEl.style.right=showStats?'350px':'14px';
+  }
+  /* ---- speech bubbles ---- */
+  const bubEl=document.getElementById('bubbles');let bubMode='important',bubs=[];
+  function pumpSpeech(){
+    while(speech.length){
+      const sp=speech.shift();if(bubMode==='off')continue;
+      const fromAI=!!sp.a.aiThought&&sp.text===sp.a.aiThought||sp.a.isQueen;
+      if(bubMode==='important'&&fromAI&&!sp.imp)continue;
+      if(bubs.some(b=>b.a===sp.a))continue;
+      if(bubs.length>=5){if(!sp.imp)continue;const old=bubs.shift();old.el.remove()}
+      const el=document.createElement('div');el.className='bub'+(fromAI?' ai':'');
+      el.innerHTML='<b>'+(fromAI?'🧠 ':'')+sp.a.name+'</b>'+sp.text.replace(/</g,'&lt;');
+      bubEl.appendChild(el);bubs.push({a:sp.a,el,until:performance.now()+(sp.imp?7000:5000)});
+    }
+    const r=cv.getBoundingClientRect(),k=r.width/W,now=performance.now();
+    bubs=bubs.filter(b=>{
+      const alive=b.a.isQueen||ants.includes(b.a);
+      if(!alive||now>b.until+600){b.el.remove();return false}
+      if(now>b.until)b.el.style.opacity='0';
+      b.el.style.left=(r.left+b.a.x*k)+'px';b.el.style.top=(r.top+(b.a.y-7)*k)+'px';
+      return true;
+    });
+  }
   /* ---- loop ---- */
   let acc=0,lastHud=0,lastSave=0;
   function frame(){
@@ -1311,7 +1407,7 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.getEleme
       if(holding&&performance.now()-holdT>250)pour(mouse.x,mouse.y,tool==='water'?WATER:SUGAR);
     }
     if(!catching){
-      render(sel&&(sel.isQueen||ants.includes(sel))?sel:null,mouse,tool);
+      render(sel&&(sel.isQueen||ants.includes(sel))?sel:null,mouse,tool);pumpSpeech();
       const t=performance.now();
       if(t-lastHud>400){
         lastHud=t;
@@ -1319,6 +1415,7 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.getEleme
         hud.innerHTML='Day '+dayOf()+' · '+(ants.length+(queen?1:0))+' ants · '+brood.length+' brood · food: '+stash+' sugar, '+protStash+' protein · soil '+Math.round(moisture*100)+'% damp · holding: <b>'+tool+'</b> (F)'+(speed>1?' · '+speed+'x':'')+' · '+aiHud()+(warn.length?' · <span class="warn">⚠ needs '+warn.join(', ')+' (S)</span>':'');
         if(sel&&(sel.isQueen||ants.includes(sel)))card.innerHTML=cardHTML(sel);else if(sel){sel=null;card.style.display='none'}
         if(showStats)statsEl.innerHTML=statsHTML();
+        updClock();
       }
       if(t-lastSave>5000){lastSave=t;save()}
     }
@@ -1327,9 +1424,9 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.getEleme
   addEventListener('beforeunload',save);
   document.addEventListener('visibilitychange',()=>{if(document.hidden)save()});
   requestAnimationFrame(frame);
-  window.__colony={get bioNow(){return bioNow},get ticks(){return tickN}};
+  window.__colony={get bioNow(){return bioNow},get ticks(){return tickN},get ants(){return ants}};
 }
-if(typeof module!=='undefined')module.exports={setBrain:b=>{brain=b},antSenses,newColony,tick,get ants(){return ants},get brood(){return brood},get stash(){return stash},get protStash(){return protStash},get moisture(){return moisture},get sites(){return sites},get places(){return places},get queen(){return queen},get nSugar(){return nSugar},get totals(){return totals},get logs(){return logs},get foods(){return foods},get corpses(){return corpses},get grid(){return grid},get bioNow(){return bioNow},get events(){return events},dropCube,dropCricket,dropWater,openArea,free,above,CAT,save,load,statsHTML,cardHTML,needs,deepest};
+if(typeof module!=='undefined')module.exports={get speech(){return speech},setBrain:b=>{brain=b},antSenses,newColony,tick,get ants(){return ants},get brood(){return brood},get stash(){return stash},get protStash(){return protStash},get moisture(){return moisture},get sites(){return sites},get places(){return places},get queen(){return queen},get nSugar(){return nSugar},get totals(){return totals},get logs(){return logs},get foods(){return foods},get corpses(){return corpses},get grid(){return grid},get bioNow(){return bioNow},get events(){return events},dropCube,dropCricket,dropWater,openArea,free,above,CAT,save,load,statsHTML,cardHTML,needs,deepest};
 })();
 </script>
 </body>
